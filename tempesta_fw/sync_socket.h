@@ -62,7 +62,7 @@ typedef struct ss_hooks {
 	 * Drop TCP connection associated with the socket.
 	 * The callback is called on intentional socket closing when the socket
 	 * is already closed (i.e. there could not be ingress data on it) and we
-	 * can safely do some clenup stuff. We need the callback sine socket
+	 * can safely do some cleanup stuff. We need the callback since socket
 	 * closing always has chance to run asynchronously on other CPU and a
 	 * caller doesn't know the it completes.
 	 */
@@ -151,5 +151,7 @@ void ss_get_stat(SsStat *stat);
 
 #define SS_CONN_TYPE(sk)							\
 	(((SsProto *)(sk)->sk_user_data)->type)
+
+extern int tfw_cfg_cli_rmem;
 
 #endif /* __SS_SOCK_H__ */

@@ -31,7 +31,7 @@
  * @seq_list	- member in the ordered queue of messages;
  * @ss_flags	- message processing flags;
  * @skb_head	- head of the list of sk_buff that belong to the message;
- * @len		- total message length;
+ * @len		- original (received) message length;
  *
  * TODO: Currently seq_list is used only in requests. Responses are not
  * put in any queues, they are simply attached to requests as req->resp.

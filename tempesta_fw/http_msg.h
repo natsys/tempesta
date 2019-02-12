@@ -94,6 +94,9 @@ tfw_http_msg_alloc_resp_light(TfwHttpReq *req)
 	return __tfw_http_msg_alloc_resp(req, false);
 }
 
+TfwHttpMsg *tfw_http_msg_alloc_stream_part(TfwHttpMsg *hm_head);
+void tfw_http_msg_collapse_streamed(TfwHttpStream *stream);
+
 int __tfw_http_msg_add_str_data(TfwHttpMsg *hm, TfwStr *str, void *data,
 				size_t len, struct sk_buff *skb);
 #define tfw_http_msg_add_str_data(hm, str, data, len)			\

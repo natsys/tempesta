@@ -404,6 +404,7 @@ enum {
 /* Generic TfwCfgSpec->handler functions. */
 int tfw_cfg_set_bool(TfwCfgSpec *self, TfwCfgEntry *parsed_entry);
 int tfw_cfg_set_int(TfwCfgSpec *spec, TfwCfgEntry *parsed_entry);
+int tfw_cfg_set_long(TfwCfgSpec *spec, TfwCfgEntry *parsed_entry);
 int tfw_cfg_set_str(TfwCfgSpec *spec, TfwCfgEntry *parsed_entry);
 int tfw_cfg_handle_children(TfwCfgSpec *self, TfwCfgEntry *parsed_entry);
 void tfw_cfg_cleanup_children(TfwCfgSpec *cs);
@@ -413,8 +414,10 @@ int tfw_cfg_check_range(long value, long min, long max);
 int tfw_cfg_check_multiple_of(long value, int divisor);
 int tfw_cfg_check_val_n(const TfwCfgEntry *e, int val_n);
 int tfw_cfg_check_single_val(const TfwCfgEntry *e);
+int __tfw_cfg_parse_int(const char *s, int *out_int);
 int tfw_cfg_parse_int(const char *s, int *out_int);
 int tfw_cfg_parse_uint(const char *s, unsigned int *out_uint);
+int tfw_cfg_parse_long(const char *s, long *out_long);
 int tfw_cfg_parse_intvl(const char *s, unsigned long *i0, unsigned long *i1);
 int tfw_cfg_map_enum(const TfwCfgEnum mappings[],
 		     const char *in_name, void *out_int);

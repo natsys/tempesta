@@ -108,5 +108,5 @@ int tfw_http_parse_req(void *req_data, unsigned char *data, size_t len,
 int tfw_http_parse_resp(void *resp_data, unsigned char *data, size_t len,
 			unsigned int *parsed);
 bool tfw_http_parse_terminate(TfwHttpMsg *hm);
-
+int tfw_http_parser_msg_may_stream(TfwHttpMsg *hm);
 #endif /* __TFW_HTTP_PARSER_H__ */

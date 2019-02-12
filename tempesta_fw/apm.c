@@ -1683,7 +1683,7 @@ static int
 tfw_cfgop_apm_server_failover(TfwCfgSpec *cs, TfwCfgEntry *ce)
 {
 	TfwApmHMCfg *hm_entry;
-	int code, limit, tframe;
+	int code, limit, tframe, r;
 
 	if (tfw_cfg_check_val_n(ce, 3))
 		return -EINVAL;
@@ -1697,21 +1697,15 @@ tfw_cfgop_apm_server_failover(TfwCfgSpec *cs, TfwCfgEntry *ce)
 			   ce->vals[0]);
 		return -EINVAL;
 	}
-	if (tfw_cfg_parse_int(ce->vals[1], &limit)) {
-		TFW_ERR_NL("Unable to parse http limit value: '%s'\n",
-			   ce->vals[1]);
-		return -EINVAL;
-	}
-	if (tfw_cfg_check_range(limit, 1, USHRT_MAX))
-		return -EINVAL;
+	if ((r = tfw_cfg_parse_int(ce->vals[1], &limit)))
+		return r;
+	if ((r = tfw_cfg_check_range(limit, 1, USHRT_MAX)))
+		return r;
 
-	if (tfw_cfg_parse_int(ce->vals[2], &tframe)) {
-		TFW_ERR_NL("Unable to parse http tframe value: '%s'\n",
-			   ce->vals[2]);
-		return -EINVAL;
-	}
-	if (tfw_cfg_check_range(tframe, 1, USHRT_MAX))
-		return -EINVAL;
+	if ((r = tfw_cfg_parse_int(ce->vals[2], &tframe)))
+		return r;
+	if ((r = tfw_cfg_check_range(tframe, 1, USHRT_MAX)))
+		return r;
 
 	hm_entry = kzalloc(sizeof(TfwApmHMCfg), GFP_KERNEL);
 	if (!hm_entry)
@@ -1845,6 +1839,7 @@ static int
 tfw_cfgop_apm_hm_resp_crc32(TfwCfgSpec *cs, TfwCfgEntry *ce)
 {
 	u32 crc32;
+	int r;
 
 	if (tfw_cfg_check_single_val(ce))
 		return -EINVAL;
@@ -1855,10 +1850,8 @@ tfw_cfgop_apm_hm_resp_crc32(TfwCfgSpec *cs, TfwCfgEntry *ce)
 		return 0;
 	}
 
-	if (tfw_cfg_parse_uint(ce->vals[0], &crc32)) {
-		TFW_ERR_NL("Unable to parse crc32 value: '%s'\n", ce->vals[0]);
-		return -EINVAL;
-	}
+	if ((r = tfw_cfg_parse_uint(ce->vals[0], &crc32)))
+		return r;
 
 	tfw_hm_entry->crc32 = crc32;
 
@@ -1868,17 +1861,14 @@ tfw_cfgop_apm_hm_resp_crc32(TfwCfgSpec *cs, TfwCfgEntry *ce)
 static int
 tfw_cfgop_apm_hm_timeout(TfwCfgSpec *cs, TfwCfgEntry *ce)
 {
-	int timeout;
+	int timeout, r;
 
-	if (tfw_cfg_check_single_val(ce))
-		return -EINVAL;
-	if (tfw_cfg_parse_int(ce->vals[0], &timeout)) {
-		TFW_ERR_NL("Unable to parse http timeout value: '%s'\n",
-			   ce->vals[0]);
-		return -EINVAL;
-	}
-	if (tfw_cfg_check_range(timeout, 1, USHRT_MAX))
-		return -EINVAL;
+	if ((r = tfw_cfg_check_single_val(ce)))
+		return r;
+	if ((r = tfw_cfg_parse_int(ce->vals[0], &timeout)))
+		return r;
+	if ((r = tfw_cfg_check_range(timeout, 1, USHRT_MAX)))
+		return r;
 
 	tfw_hm_entry->tmt = timeout;
 

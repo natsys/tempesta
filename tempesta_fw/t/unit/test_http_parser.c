@@ -1368,7 +1368,8 @@ TEST(http_parser, empty_host)
 TEST(http_parser, chunked)
 {
 	TfwHttpHdrTbl *ht;
-	TfwStr h_connection;
+	TfwStr *h_trailer;
+	const char *s_trailer = "Trailer-Hdr: some-hdr-var";
 
 	FOR_REQ("POST / HTTP/1.1\r\n"
 		"Host:\r\n"
@@ -1381,18 +1382,16 @@ TEST(http_parser, chunked)
 		"2;a=1\n"
 		"89\r\n"
 		"0\n"
-		"Connection: close\r\n"
+		"Trailer-Hdr: some-hdr-var\r\n"
 		"\r\n")
 	{
 		ht = req->h_tbl;
 
 		EXPECT_TRUE(req->body.len == 46);
 
-		tfw_http_msg_srvhdr_val(&ht->tbl[TFW_HTTP_HDR_CONNECTION],
-					TFW_HTTP_HDR_CONNECTION,
-					&h_connection);
-		EXPECT_TRUE(tfw_str_eq_cstr(&h_connection, "close",
-					    sizeof("close") - 1, 0));
+		h_trailer = &ht->tbl[TFW_HTTP_HDR_RAW];
+		EXPECT_TRUE(tfw_str_eq_cstr(h_trailer, s_trailer,
+					    strlen(s_trailer), 0));
 	}
 
 	FOR_RESP("HTTP/1.1 200 OK\r\n"
@@ -1401,18 +1400,16 @@ TEST(http_parser, chunked)
 		 "5\r\n"
 		 "abcde\r\n"
 		 "0;test\n"
-		 "Connection: keep-alive\r\n"
+		 "Trailer-Hdr: some-hdr-var\r\n"
 		 "\r\n")
 	{
 		ht = resp->h_tbl;
 
 		EXPECT_TRUE(resp->body.len == 17);
 
-		tfw_http_msg_srvhdr_val(&ht->tbl[TFW_HTTP_HDR_CONNECTION],
-					TFW_HTTP_HDR_CONNECTION,
-					&h_connection);
-		EXPECT_TRUE(tfw_str_eq_cstr(&h_connection, "keep-alive",
-					    sizeof("keep-alive") - 1, 0));
+		h_trailer = &ht->tbl[TFW_HTTP_HDR_RAW];
+		EXPECT_TRUE(tfw_str_eq_cstr(h_trailer, s_trailer,
+					    strlen(s_trailer), 0));
 	}
 
 	EXPECT_BLOCK_REQ("GET / HTTP/1.1\r\n"
@@ -1426,7 +1423,17 @@ TEST(http_parser, chunked)
 			 "2;a=1\n"
 			 "89\r\n"
 			 "0\n"
-			 "Connection: close\r\n"
+			 "Trailer-Hdr: some-hdr-var\r\n"
+			 "\r\n");
+
+	/* Forbidden headers in trailer: */
+	EXPECT_BLOCK_REQ("HTTP/1.1 200 OK\r\n"
+			 "Transfer-Encoding: chunked\r\n"
+			 "\n"
+			 "5\r\n"
+			 "abcde\r\n"
+			 "0;test\n"
+			 "Connection: close\r\n" /* Can't be in trailer. */
 			 "\r\n");
 }
 

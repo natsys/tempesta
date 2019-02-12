@@ -530,7 +530,8 @@ parse_int_list(unsigned char *data, size_t len, unsigned long *acc)
  * @return number of parsed bytes.
  */
 static int
-parse_int_hex(unsigned char *data, size_t len, unsigned long *acc, unsigned short *cnt)
+parse_int_hex(unsigned char *data, size_t len, unsigned long *acc,
+	      unsigned short *cnt)
 {
 	unsigned char *p;
 
@@ -924,6 +925,8 @@ __FSM_STATE(st_curr) {							\
 		TFW_PARSER_BLOCK(st_curr);				\
 	/* Store header name and field in different chunks. */		\
 	__msg_hdr_chunk_fixup(data, p - data);				\
+	if (__check_trailer_hdr((msg), st_curr))			\
+		TFW_PARSER_BLOCK(st_curr);				\
 	__fsm_n = func(hm, p, __fsm_sz);				\
 	TFW_DBG3("parse special header " #func ": ret=%d data_len=%lu"	\
 		 " id=%d\n", __fsm_n, __fsm_sz, id);			\
@@ -964,6 +967,8 @@ __FSM_STATE(st_curr) {							\
 	 * before the header-value, and we lose this part. It should be forced
 	 * to save it.*/						\
 	__msg_hdr_chunk_fixup(data, p - data);				\
+	if (__check_trailer_hdr((msg), st_curr))			\
+		TFW_PARSER_BLOCK(st_curr);				\
 	__fsm_n = func(hm, p, __fsm_sz);				\
 	TFW_DBG3("parse raw header " #func ": ret=%d data_len=%lu\n",	\
 		 __fsm_n, __fsm_sz);					\
@@ -1005,6 +1010,8 @@ __FSM_STATE(RGen_HdrOther) {						\
 __FSM_STATE(RGen_HdrOtherN) {						\
 	__FSM_MATCH_MOVE(token, RGen_HdrOtherN);			\
 	if (likely(*(p + __fsm_sz) == ':')) {				\
+		if (__check_trailer_hdr_name(msg))			\
+			TFW_PARSER_BLOCK(RGen_HdrOtherN);		\
 		parser->_i_st = RGen_HdrOtherV;				\
 		__FSM_MOVE_n(RGen_OWS, __fsm_sz + 1);			\
 	}								\
@@ -2280,6 +2287,140 @@ enum {
 };
 
 
+/*
+ * RFC 7230 Ssection-4.1.2
+ * A sender MUST NOT generate a trailer that contains a field necessary
+ * for message framing (e.g., Transfer-Encoding and Content-Length),
+ * routing (e.g., Host), request modifiers (e.g., controls and
+ * conditionals in Section 5 of [RFC7231]), authentication (e.g., see
+ * [RFC7235] and [RFC6265]), response control data (e.g., see Section
+ * 7.1 of [RFC7231]), or determining how to process the payload (e.g.,
+ * Content-Encoding, Content-Type, Content-Range, and Trailer).
+ *
+ * The header name was identified by Tempesta, so we can avoid heavy string
+ * comparisons here.
+ */
+static int
+__check_trailer_hdr(TfwHttpMsg *hm, int st_curr)
+{
+	/* On parse primary header part. */
+	if (!(hm->crlf.flags & TFW_STR_COMPLETE))
+		return TFW_PASS;
+
+	switch (st_curr) {
+	/*
+	 * All headers currently processed by TempestaFW affects the way
+	 * message is processed. Deny all of them in trailer part.
+	 */
+	case Req_HdrAcceptV:
+	case Req_HdrAuthorizationV:
+	case Req_HdrCache_ControlV:
+	case Req_HdrConnectionV:
+	case Req_HdrContent_LengthV:
+	case Req_HdrContent_TypeV:
+	case Req_HdrCookieV:
+	case Req_HdrHostV:
+	case Req_HdrIf_Modified_SinceV:
+	case Req_HdrIf_None_MatchV:
+	case Req_HdrKeep_AliveV:
+	case Req_HdrPragmaV:
+	case Req_HdrRefererV:
+	case Req_HdrTransfer_EncodingV:
+	case Req_HdrUser_AgentV:
+	case Req_HdrX_Forwarded_ForV:
+
+	case Resp_HdrAgeV:
+	case Resp_HdrCache_ControlV:
+	case Resp_HdrConnectionV:
+	case Resp_HdrContent_LengthV:
+	case Resp_HdrContent_TypeV:
+	case Resp_HdrDateV:
+	case Resp_HdrEtagV:
+	case Resp_HdrExpiresV:
+	case Resp_HdrKeep_AliveV:
+	case Resp_HdrLast_ModifiedV:
+	case Resp_HdrServerV:
+	case Resp_HdrTransfer_EncodingV:
+
+		TFW_DBG("Trailer contains not allowed headers.");
+		return TFW_BLOCK;
+
+	default:
+		return TFW_BLOCK;
+	}
+
+	/*
+	 * Block the message if sender violated requirements marked as
+	 * SHOULD in RFC, or pass the message. It's up to user.
+	 *
+	 * TODO:RFC 7230 Ssection-4.1.2
+	 * Unless the request includes a TE header field indicating "trailers"
+	 * is acceptable, as described in Section 4.3, a server SHOULD NOT
+	 * generate trailer fields that it believes are necessary for the user
+	 * agent to receive.
+	 *
+	 * RFC doesn't restrict situations, when client is allowed to send
+	 * headers in trailer part.
+	 *
+	 * TODO: RFC7230 Section-4.4
+	 * ... the sender SHOULD
+	 * generate a Trailer header field before the message body to indicate
+	 * which fields will be present in the trailers.
+	 */
+	return TFW_PASS;
+}
+
+/*
+ * Same as __check_trailer_hdr(), but the header wasn't identified by Tempesta,
+ * so generic string comparison is required.
+ *
+ * TBD: Parsing of streamed message parts is much simpler and doesn't involve
+ * FSM scans over the all known headers (see tfw_http_parse_req_stream()).
+ * but FSM is still faster than the binary search.
+ */
+static int
+__check_trailer_hdr_name(TfwHttpMsg *hm)
+{
+	static const TfwStr not_allowed[] = {
+		TFW_STR_STRING("accept:"),
+		TFW_STR_STRING("age:"),
+		TFW_STR_STRING("authorization:"),
+		TFW_STR_STRING("cache-control:"),
+		TFW_STR_STRING("connection:"),
+		TFW_STR_STRING("content-length:"),
+		TFW_STR_STRING("content-type:"),
+		TFW_STR_STRING("cookie:"),
+		TFW_STR_STRING("date:"),
+		TFW_STR_STRING("etag:"),
+		TFW_STR_STRING("expires:"),
+		TFW_STR_STRING("host:"),
+		TFW_STR_STRING("host:"),
+		TFW_STR_STRING("if-modified-since:"),
+		TFW_STR_STRING("if-none-match:"),
+		TFW_STR_STRING("keep-alive:"),
+		TFW_STR_STRING("last-modified:"),
+		TFW_STR_STRING("pragma:"),
+		TFW_STR_STRING("referer:"),
+		TFW_STR_STRING("server:"),
+		TFW_STR_STRING("transfer-encoding:"),
+		TFW_STR_STRING("user-agent:"),
+		TFW_STR_STRING("x-forwarded-for:"),
+	};
+	TfwStr *hdr =  &hm->conn->parser.hdr;
+
+	/* On parse primary header part. */
+	if (!(hm->crlf.flags & TFW_STR_COMPLETE)
+	    || !test_bit(TFW_HTTP_B_STREAM_PART, hm->flags))
+	{
+		return TFW_PASS;
+	}
+	if (tfw_http_msg_find_hdr(hdr, not_allowed))
+		return CSTR_NEQ;
+	/* TODO: see todos in the __check_trailer_hdr() */
+
+	return 0;
+}
+
 static int
 __req_parse_accept(TfwHttpReq *req, unsigned char *data, size_t len)
 {
@@ -3410,6 +3551,54 @@ tfw_http_init_parser_req(TfwHttpReq *req)
 	hbh_hdrs->spec = 0x1 << TFW_HTTP_HDR_CONNECTION;
 }
 
+/*
+ * Parse streamed request part.
+ *
+ * TBD: it's not safe to pass the streamed message part to tfw_http_parse_req(),
+ * since it doesn't contain all the TfwHttpReq members. But tfw_http_parse_req()
+ * defines more robust parsing functions for some HTTP headers (the #1050/1053
+ * issue requires full validation of all headers and is to provide even more
+ * robust parsers). At this time we can avoid copy-pasting the parsers here,
+ * since all the known headers are forbidden in the trailer part, see
+ * __check_trailer_hdr_name().
+ */
+int
+tfw_http_parse_req_stream(TfwHttpMsg *hm, unsigned char *data,
+			   size_t len, unsigned int *parsed)
+{
+	int r = TFW_BLOCK;
+	__FSM_DECLARE_VARS(hm);
+
+	TFW_DBG("parse %lu server data bytes (%.*s%s) on req_stream=%p\n",
+		len, min(500, (int)len), data, len > 500 ? "..." : "", hm);
+
+	/* Body is not fully stored in streamed messages and freed on send. */
+	if (TFW_STR_EMPTY(&msg->body))
+		tfw_http_msg_set_str_data(msg, &msg->body, p);
+
+	__FSM_START(parser->state) {
+	/* ----------------    Trailer headers    ---------------- */
+	__FSM_STATE(RGen_Hdr) {
+		TFW_HTTP_PARSE_CRLF();
+		tfw_http_msg_hdr_open(msg, p);
+		__FSM_JMP(RGen_HdrOther);
+	}
+	RGEN_HDR_OTHER();
+	RGEN_OWS();
+	RGEN_EOL();
+	RGEN_CRLF();
+
+	/* ----------------    Request body    ---------------- */
+
+	TFW_HTTP_INIT_REQ_BODY_PARSING();
+	TFW_HTTP_PARSE_BODY();
+
+	}
+	__FSM_FINISH(msg);
+
+	return r;
+}
+
 int
 tfw_http_parse_req(void *req_data, unsigned char *data, size_t len,
 		   unsigned int *parsed)
@@ -3419,12 +3608,13 @@ tfw_http_parse_req(void *req_data, unsigned char *data, size_t len,
 	__FSM_DECLARE_VARS(req);
 	*parsed = 0;
 
+	if (unlikely(test_bit(TFW_HTTP_B_STREAM_PART, msg->flags)))
+		return tfw_http_parse_req_stream(msg, data, len, parsed);
+
 	TFW_DBG("parse %lu client data bytes (%.*s%s) on req=%p\n",
 		len, min(500, (int)len), data, len > 500 ? "..." : "", req);
 
 	__FSM_START(parser->state) {
-
-	/* ----------------    Request Line    ---------------- */
 
 	/* Parser internal initializers, must be called once per message. */
 	__FSM_STATE(Req_0) {
@@ -3432,6 +3622,8 @@ tfw_http_parse_req(void *req_data, unsigned char *data, size_t len,
 			__FSM_MOVE_nofixup(Req_0);
 		/* fall through */
 	}
+
+	/* ----------------    Request Line    ---------------- */
 
 	/* HTTP method. */
 	__FSM_STATE(Req_Method) {
@@ -4833,6 +5025,46 @@ tfw_http_adj_parser_resp(TfwHttpResp *resp)
 }
 
 int
+tfw_http_parse_resp_stream(TfwHttpMsg *hm, unsigned char *data,
+			   size_t len, unsigned int *parsed)
+{
+	int r = TFW_BLOCK;
+	__FSM_DECLARE_VARS(hm);
+
+	TFW_DBG("parse %lu server data bytes (%.*s%s) on resp_stream=%p\n",
+		len, min(500, (int)len), data, len > 500 ? "..." : "",
+		hm);
+
+	/* Body is not fully stored in streamed messages and freed on send. */
+	if (TFW_STR_EMPTY(&msg->body))
+		tfw_http_msg_set_str_data(msg, &msg->body, p);
+
+	__FSM_START(parser->state) {
+
+		/* ----------------    Trailer headers    ---------------- */
+	__FSM_STATE(RGen_Hdr) {
+		TFW_HTTP_PARSE_CRLF();
+		tfw_http_msg_hdr_open(msg, p);
+		__FSM_JMP(RGen_HdrOther);
+	}
+	RGEN_HDR_OTHER();
+	RGEN_OWS();
+	RGEN_EOL();
+	RGEN_CRLF();
+
+	/* ----------------    Response body    ---------------- */
+
+	TFW_HTTP_INIT_RESP_BODY_PARSING();
+	TFW_HTTP_PARSE_BODY();
+	TFW_HTTP_PARSE_BODY_UNLIM();
+
+	}
+	__FSM_FINISH(msg);
+
+	return r;
+}
+
+int
 tfw_http_parse_resp(void *resp_data, unsigned char *data, size_t len,
 		    unsigned int *parsed)
 {
@@ -4843,6 +5075,9 @@ tfw_http_parse_resp(void *resp_data, unsigned char *data, size_t len,
 
 	BUILD_BUG_ON((int)Req_StatesNum >= (int)Resp_0);
 	BUILD_BUG_ON((int)Resp_StatesNum >= (int)RGen_OWS);
+
+	if (unlikely(test_bit(TFW_HTTP_B_STREAM_PART, msg->flags)))
+		return tfw_http_parse_resp_stream(msg, data, len, parsed);
 
 	TFW_DBG("parse %lu server data bytes (%.*s%s) on resp=%p\n",
 		len, min(500, (int)len), data, len > 500 ? "..." : "", resp);
@@ -5360,4 +5595,23 @@ tfw_http_parse_resp(void *resp_data, unsigned char *data, size_t len,
 	__FSM_FINISH(resp);
 
 	return r;
+}
+
+/**
+ * Checks if it's safe to stream the message.
+ *
+ * It's safe to stream the message in only one case: during message body
+ * parsing. Tempesta requires full set of headers to process the message;
+ * trailer headers can be modified, so must also be buffered.
+ * Return TFW_PASS if it's safe to stream the message, and TFW_POSTPONE
+ * if some buffering is required.
+ */
+int
+tfw_http_parser_msg_may_stream(TfwHttpMsg *hm)
+{
+	if (!(hm->crlf.flags & TFW_STR_COMPLETE))
+		return TFW_POSTPONE;
+	if (!(hm->body.flags & TFW_STR_COMPLETE))
+		return TFW_PASS;
+	return TFW_POSTPONE;
 }

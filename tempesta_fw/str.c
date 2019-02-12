@@ -243,6 +243,17 @@ tfw_str_add_duplicate(TfwPool *pool, TfwStr *str)
 	return dup_str;
 }
 
+void
+tfw_str_free(TfwPool *pool, TfwStr *str)
+{
+	BUG_ON(TFW_STR_DUP(str));
+
+	if (!TFW_STR_PLAIN(str))
+		tfw_pool_free(pool, str->chunks, str->nchunks * sizeof(TfwStr));
+
+	TFW_STR_INIT(str);
+}
+
 /**
  * Function for deep TfwStr copying.
  */

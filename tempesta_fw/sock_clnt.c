@@ -40,6 +40,11 @@
 static struct kmem_cache *tfw_cli_conn_cache;
 static struct kmem_cache *tfw_tls_conn_cache;
 static int tfw_cli_cfg_ka_timeout = -1;
+/*
+ * Maximum size of memory used to store requests. Used for receive window size
+ * steering
+ */
+int tfw_cfg_cli_rmem __read_mostly = 0;
 
 static inline struct kmem_cache *
 tfw_cli_cache(int type)
@@ -293,6 +298,62 @@ tfw_cli_conn_close_all(TfwClient *cli)
 
 /*
  * ------------------------------------------------------------------------
+ *	Receive buffer management.
+ * ------------------------------------------------------------------------
+ */
+
+/**
+ * A new part of the http message was parsed. Account its size in rmem to
+ * manage the receive window. See `tfw_cfgop_cli_rmem` description.
+ *
+ * @sz is always less than INT_MAX, save to use it as 32-bit integer.
+ * Total memory used for all requests can't be bigger than 'client_rmem' value,
+ * which is 32-bit integer.
+ */
+void
+tfw_cli_rmem_reserve(TfwCliConn *cli_conn, unsigned int sz)
+{
+	struct sock *sk = cli_conn->sk;
+
+	BUG_ON(!sk);
+	if (!(sk->sk_userlocks & SOCK_RCVBUF_LOCK))
+		return;
+
+	atomic_add(sz, &cli_conn->rmem_used);
+	atomic_add(sz, &sk->sk_rmem_alloc);
+	smp_mb__after_atomic();
+}
+
+void
+tfw_cli_rmem_release(TfwCliConn *cli_conn, unsigned int sz)
+{
+	struct sock *sk = cli_conn->sk;
+
+	BUG_ON(!sk);
+	if (!(sk->sk_userlocks & SOCK_RCVBUF_LOCK))
+		return;
+
+	atomic_sub(sz, &cli_conn->rmem_used);
+	atomic_sub(sz, &sk->sk_rmem_alloc);
+	smp_mb__after_atomic();
+}
+
+void
+tfw_cli_rmem_drop(TfwCliConn *cli_conn)
+{
+	struct sock *sk = cli_conn->sk;
+
+	BUG_ON(!sk);
+	if (!(sk->sk_userlocks & SOCK_RCVBUF_LOCK))
+		return;
+
+	smp_mb__before_atomic();
+	atomic_sub(atomic_read(&cli_conn->rmem_used), &sk->sk_rmem_alloc);
+	atomic_set(&cli_conn->rmem_used, 0);
+}
+
+/*
+ * ------------------------------------------------------------------------
  *	Listening socket handling.
  * ------------------------------------------------------------------------
  */
@@ -408,6 +469,22 @@ tfw_listen_sock_start(TfwListenSock *ls)
 	sk->sk_user_data = ls;
 
 	/*
+	 * Limit receive window size for accepted connections.
+	 * Similarly to setsockopt() behaviour, double the limit
+	 * on the way in to account for "struct sk_buff" etc. overhead.
+	 * Set a smaller limit for beginning, if a client performs fast the
+	 * limit will be updated in ss_rcv_space_adjust().
+	 */
+	if (tfw_cfg_cli_rmem) {
+		int bsz = tfw_cfg_cli_rmem * 2;
+
+		if (/* sysctl_tcp_moderate_rcvbuf && */ (bsz > sysctl_tcp_rmem[1]))
+			bsz = sysctl_tcp_rmem[1];
+		sk->sk_userlocks |= SOCK_RCVBUF_LOCK;
+		sk->sk_rcvbuf = bsz;
+	}
+
+	/*
 	 * For listening sockets we use
 	 * ss_set_listen() instead of ss_set_callbacks().
 	 */
@@ -470,7 +547,7 @@ tfw_cfgop_listen(TfwCfgSpec *cs, TfwCfgEntry *ce)
 	 * - a full IP address (e.g. "listen 127.0.0.1:8081").
 	 */
 	in_str = ce->vals[0];
-	r = tfw_cfg_parse_int(in_str, &port);
+	r = __tfw_cfg_parse_int(in_str, &port);
 	if (!r) {
 		r = tfw_cfg_check_range(port, 0, 65535);
 		if (r)
@@ -519,23 +596,76 @@ tfw_cfgop_keepalive_timeout(TfwCfgSpec *cs, TfwCfgEntry *ce)
 	int r;
 
 	if ((r = tfw_cfg_check_val_n(ce, 1)))
-		return -EINVAL;
+		return r;
 
-	if ((r = tfw_cfg_parse_int(ce->vals[0], &tfw_cli_cfg_ka_timeout))) {
-		TFW_ERR_NL("Unable to parse 'keepalive_timeout' value: '%s'\n",
-			   ce->vals[0] ? : "No value specified");
-		return -EINVAL;
-	}
-
-	if (tfw_cli_cfg_ka_timeout < 0) {
-		TFW_ERR_NL("Unable to parse 'keepalive_timeout' value: '%s'\n",
-			   "Value less the zero");
-		return -EINVAL;
-	}
+	if ((r = tfw_cfg_parse_int(ce->vals[0], &tfw_cli_cfg_ka_timeout)))
+		return r;
+	if ((r = tfw_cfg_check_range(tfw_cli_cfg_ka_timeout, 0, INT_MAX)))
+		return r;
 
 	return 0;
 }
 
+/**
+ * Limit total memory used to serve single TCP connection.
+ *
+ * Received skb may be stored in one of two buffers: socket receive buffer
+ * (sk->sk_receive_queue) or Tempesta connection buffer (TfwCliConn->seq_queue).
+ * Receive buffer size is limited by 'net.core.rmem_max' and
+ * 'net.ipv4.tcp_rmem'. The kernel manages tcp receive window size to slow
+ * dawn clients when the socket receive buffer is about to be full.
+ *
+ * When skb is stored in receive queue, it's tracked in sk->sk_rmem_alloc.
+ * The kernel uses the parameter to calculate available receive window size.
+ * When the option is enabled, HTTP messages stored in Tempesta connection
+ * buffer are also tracked by sk->sk_rmem_alloc. Thus the kernel is aware of
+ * free space in both buffers when a new TCP window is calculated.
+ *
+ * Note, the http message size and underlying skb size can change during
+ * message processing inside the Tempesta due to message modifications.
+ * Two variants are possible: mirror all modifications to sk->sk_rmem_alloc
+ * or operate only by original message size. The second case was chosen
+ * because its simplicity and error-free possibilities.
+ *
+ * Generally we don't want the same rmem limits for clients and servers.
+ * Server connections are fast and require relatively big buffers.
+ * Client connections doesn't require high speeds, but a big number of
+ * client connections can cause memory starvation. Limit client connection
+ * socket buffer size with SO_RCVBUF to deny automatic buffer size moderation
+ * inside the kernel functions.
+ *
+ * Restricting buffer size for a server connection in the same way is a bad
+ * idea. Responses stored as pairs for requests in client seq_queue may belong
+ * to different servers. There can be tricky situations leading to server
+ * receive and forwarding deadlocks if clients are slow or advertise zero
+ * windows.
+ *
+ * If zero receive window was advertised to client, the client connection will
+ * be closed after 'keepalive_timeout'. Responses forwarded rearm the timer,
+ * while window probe requests are not.
+ */
+static int
+tfw_cfgop_cli_rmem(TfwCfgSpec *cs, TfwCfgEntry *ce)
+{
+	int r;
+
+	/*
+	 * The value for specific socket can overflow system limits tcp_rmem[2]
+	 * and rmem_max. See SO_RCVBUFFORCE socket option.
+	 *
+	 * '0' means the option is disabled (defaults), but positive values
+	 * below 'SOCK_MIN_RCVBUF / 2' are not allowed. Enforce correct value.
+	 */
+	if ((r = tfw_cfg_set_int(cs, ce)))
+		return r;
+	if (tfw_cfg_cli_rmem && (tfw_cfg_cli_rmem < SOCK_MIN_RCVBUF / 2)) {
+		tfw_cfg_cli_rmem = SOCK_MIN_RCVBUF / 2;
+		TFW_WARN_NL("%s: value is too small, set to %i\n",
+			    cs->name, tfw_cfg_cli_rmem);
+	}
+
+	return 0;
+}
 
 static void
 tfw_cfgop_cleanup_sock_clnt(TfwCfgSpec *cs)
@@ -637,6 +767,20 @@ static TfwCfgSpec tfw_sock_clnt_specs[] = {
 		.handler = tfw_cfgop_keepalive_timeout,
 		.cleanup = tfw_cfgop_cleanup_sock_clnt,
 		.allow_repeat = false,
+	},
+	{
+		.name = "client_rmem",
+		.deflt = "0", /* No limit. */
+		.handler = tfw_cfgop_cli_rmem,
+		.dest = &tfw_cfg_cli_rmem,
+		.spec_ext = &(TfwCfgSpecInt) {
+			/*
+			 * The value is used for (int)sock->sk_rcvbuf and
+			 * multiplicated by 2, limit maximum possible value
+			 * to prevent overflows.
+			*/
+			.range = { 0, INT_MAX / 2 },
+		},
 	},
 	{ 0 }
 };

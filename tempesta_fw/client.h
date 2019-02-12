@@ -51,4 +51,8 @@ void tfw_cli_conn_release(TfwCliConn *cli_conn);
 int tfw_cli_conn_send(TfwCliConn *cli_conn, TfwMsg *msg);
 void tfw_cli_wait_release(void);
 
+void tfw_cli_rmem_reserve(TfwCliConn *cli_conn, unsigned int sz);
+void tfw_cli_rmem_release(TfwCliConn *cli_conn, unsigned int sz);
+void tfw_cli_rmem_drop(TfwCliConn *cli_conn);
+
 #endif /* __TFW_CLIENT_H__ */

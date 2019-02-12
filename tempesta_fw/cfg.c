@@ -1242,7 +1242,7 @@ tfw_cfg_check_range(long value, long min, long max)
 	if (min != max && (value < min || value > max)) {
 		TFW_ERR_NL("the value %ld is out of range: [%ld, %ld]\n",
 			   value, min, max);
-		return -EINVAL;
+		return -ERANGE;
 	}
 	return 0;
 }
@@ -1344,25 +1344,57 @@ detect_base(const char **pos)
 }
 
 int
-tfw_cfg_parse_int(const char *s, int *out_int)
+__tfw_cfg_parse_int(const char *s, int *out_int)
 {
 	int base = detect_base(&s);
 	if (!base)
 		return -EINVAL;
 	return kstrtoint(s, base, out_int);
 }
+
+int
+tfw_cfg_parse_int(const char *s, int *out_int)
+{
+	int r = __tfw_cfg_parse_int(s, out_int);
+	if (r)
+		TFW_ERR_NL("Can't parse '%s' as 'int'\n", s);
+	return r;
+}
 EXPORT_SYMBOL(tfw_cfg_parse_int);
 
 int
 tfw_cfg_parse_uint(const char *s, unsigned int *out_uint)
 {
-	int base = detect_base(&s);
+	int r = -EINVAL, base;
 
-	if (!base)
-		return -EINVAL;
-	return kstrtouint(s, base, out_uint);
+	if (!(base = detect_base(&s)))
+		goto err;
+	if ((r = kstrtouint(s, base, out_uint)))
+		goto err;
+
+	return 0;
+err:
+	TFW_ERR_NL("Can't parse '%s' as 'unsigned int'\n", s);
+	return r;
 }
 EXPORT_SYMBOL(tfw_cfg_parse_uint);
+
+int
+tfw_cfg_parse_long(const char *s, long *out_long)
+{
+	int r = -EINVAL, base;
+
+	if (!(base = detect_base(&s)))
+		goto err;
+	if ((r = kstrtol(s, base, out_long)))
+		goto err;
+
+	return 0;
+err:
+	TFW_ERR_NL("Can't parse '%s' as 'long'\n", s);
+	return r;
+}
+EXPORT_SYMBOL(tfw_cfg_parse_long);
 
 /**
  * Borrowed from linux/lib/kstrtox.c because the function isn't exported by
@@ -1615,31 +1647,38 @@ tfw_cfg_set_bool(TfwCfgSpec *cs, TfwCfgEntry *e)
 }
 EXPORT_SYMBOL(tfw_cfg_set_bool);
 
-int
-tfw_cfg_set_int(TfwCfgSpec *cs, TfwCfgEntry *e)
+static int
+__tfw_cfg_set_int(TfwCfgSpec *cs, TfwCfgEntry *e, bool is_long)
 {
-	int r, val;
-	int *dest_int;
+	int r;
+	int int_val = 0;
+	long val;
 	const char *in_str;
-	TfwCfgSpecInt *cse;
+	TfwCfgSpecInt *cse = cs->spec_ext;
 
 	BUG_ON(!cs->dest);
 
 	if ((r = tfw_cfg_check_single_val(e)))
-		goto err;
+		return -EINVAL;
+	in_str = e->vals[0];
 
 	/* First, try to substitute an enum keyword with an integer value. */
-	in_str = e->vals[0];
-	cse = cs->spec_ext;
-	if (cse && cse->enums) {
-		r = tfw_cfg_map_enum(cse->enums, in_str, &val);
-		if (!r)
-			goto val_is_parsed;
+	if (cse && cse->enums
+	    && !tfw_cfg_map_enum(cse->enums, in_str, &int_val))
+	{
+		val = int_val;
+		goto val_is_parsed;
 	}
 
-	r = tfw_cfg_parse_int(in_str, &val);
+	if (is_long) {
+		r = tfw_cfg_parse_long(in_str, &val);
+	}
+	else {
+		r = tfw_cfg_parse_int(in_str, &int_val);
+		val = int_val;
+	}
 	if (r)
-		goto err;
+		return r;
 
 val_is_parsed:
 	/* Check value restrictions if we have any in the spec extension. */
@@ -1647,18 +1686,30 @@ val_is_parsed:
 		r  = tfw_cfg_check_multiple_of(val, cse->multiple_of);
 		r |= tfw_cfg_check_range(val, cse->range.min, cse->range.max);
 		if (r)
-			goto err;
+			return r;
 	}
 
-	dest_int = cs->dest;
-	*dest_int = val;
-	return 0;
+	if (is_long)
+		*(long *)cs->dest = val;
+	else
+		*(int *)cs->dest = val;
 
-err:
-	TFW_ERR_NL("can't parse integer");
-	return -EINVAL;
+	return 0;
+}
+
+int
+tfw_cfg_set_int(TfwCfgSpec *cs, TfwCfgEntry *e)
+{
+	return __tfw_cfg_set_int(cs, e, false);
 }
 EXPORT_SYMBOL(tfw_cfg_set_int);
+
+int
+tfw_cfg_set_long(TfwCfgSpec *cs, TfwCfgEntry *e)
+{
+	return __tfw_cfg_set_int(cs, e, true);
+}
+EXPORT_SYMBOL(tfw_cfg_set_long);
 
 static void
 tfw_cfg_cleanup_str(TfwCfgSpec *cs)

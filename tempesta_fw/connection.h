@@ -150,12 +150,14 @@ typedef struct {
  * @seq_queue	- queue of client's messages in the order they came;
  * @seq_qlock	- lock for accessing @seq_queue;
  * @ret_qlock	- lock for serializing sets of responses;
+ * @rmem_used	- total memory used by all pending requests;
  */
 typedef struct {
 	TFW_CONN_COMMON;
 	struct list_head	seq_queue;
 	spinlock_t		seq_qlock;
 	spinlock_t		ret_qlock;
+	atomic_t		rmem_used;
 } TfwCliConn;
 
 /*

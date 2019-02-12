@@ -1150,24 +1150,19 @@ tfw_cfgop_sticky(TfwCfgSpec *cs, TfwCfgEntry *ce)
 {
 	size_t i, len;
 	const char *key, *val, *name_val = STICKY_NAME_DEFAULT;
+	int r;
 
 	TFW_CFG_ENTRY_FOR_EACH_ATTR(ce, i, key, val) {
 		if (!strcasecmp(key, "name")) {
 			name_val = val;
 		} else if (!strcasecmp(key, "max_misses")) {
-			if (tfw_cfg_parse_uint(val, &tfw_cfg_sticky.max_misses))
-			{
-				TFW_ERR_NL("%s: invalid value for 'max_misses'"
-					   " attribute: '%s'\n", cs->name, val);
-				return -EINVAL;
-			}
+			r = tfw_cfg_parse_uint(val, &tfw_cfg_sticky.max_misses);
+			if (r)
+				return r;
 		} else if (!strcasecmp(key, "timeout")) {
-			if (tfw_cfg_parse_uint(val, &tfw_cfg_sticky.tmt_sec))
-			{
-				TFW_ERR_NL("%s: invalid value for 'timeout'"
-					   " attribute: '%s'\n", cs->name, val);
-				return -EINVAL;
-			}
+			r = tfw_cfg_parse_uint(val, &tfw_cfg_sticky.tmt_sec);
+			if (r)
+				return r;
 		} else {
 			TFW_ERR_NL("%s: unsupported argument: '%s=%s'.\n",
 				   cs->name, key, val);
@@ -1276,10 +1271,8 @@ tfw_cfgop_jsch_parse(TfwCfgSpec *cs, const char *key, const char *val,
 {
 	int r;
 
-	if ((r = tfw_cfg_parse_uint(val, uint_val))) {
-		TFW_ERR_NL("%s: can't parse key '%s'\n", cs->name, key);
+	if ((r = tfw_cfg_parse_uint(val, uint_val)))
 		return r;
-	}
 
 	return 0;
 }
@@ -1289,10 +1282,8 @@ tfw_cfg_op_jsch_parse_resp_code(TfwCfgSpec *cs, const char *val)
 {
 	int r, int_val;
 
-	if ((r = tfw_cfg_parse_int(val, &int_val))) {
-		TFW_ERR_NL("%s: can't parse key 'resp_code'\n", cs->name);
+	if ((r = tfw_cfg_parse_int(val, &int_val)))
 		return r;
-	}
 	if ((r = tfw_cfg_check_range(int_val, 100, 599)))
 		return r;
 	tfw_cfg_js_ch->st_code = int_val;

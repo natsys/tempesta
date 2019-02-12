@@ -123,7 +123,7 @@
 static const unsigned long tfw_srv_tmo_vals[] = { 1, 10, 100, 250, 500, 1000 };
 
 #define srv_warn(check, addr, fmt, ...)					\
-	TFW_WARN_MOD_ADDR(sock_srv, check, addr, TFW_NO_PORT, fmt,	\
+	TFW_WARN_MOD_ADDR(sock_srv, check, addr, TFW_WITH_PORT, fmt,	\
 	                  ##__VA_ARGS__)
 
 /**
@@ -1334,25 +1334,23 @@ tfw_cfgop_server(TfwCfgSpec *cs, TfwCfgEntry *ce, TfwCfgSrvGroup *sg_cfg)
 	}
 
 	TFW_CFG_ENTRY_FOR_EACH_ATTR(ce, i, key, val) {
+		int r;
+
 		if (!strcasecmp(key, "conns_n")) {
 			if (has_conns_n) {
 				TFW_ERR_NL("Duplicate argument: '%s'\n", key);
 				return -EINVAL;
 			}
-			if (tfw_cfg_parse_int(val, &conns_n)) {
-				TFW_ERR_NL("Invalid value: '%s'\n", val);
-				return -EINVAL;
-			}
+			if ((r = tfw_cfg_parse_int(val, &conns_n)))
+				return r;
 			has_conns_n = true;
 		} else if (!strcasecmp(key, "weight")) {
 			if (has_weight) {
 				TFW_ERR_NL("Duplicate argument: '%s'\n", key);
 				return -EINVAL;
 			}
-			if (tfw_cfg_parse_int(val, &weight)) {
-				TFW_ERR_NL("Invalid value: '%s'\n", val);
-				return -EINVAL;
-			}
+			if ((r = tfw_cfg_parse_int(val, &weight)))
+				return r;
 			has_weight = true;
 		} else {
 			TFW_ERR_NL("Unsupported argument: '%s'\n", key);
@@ -1645,15 +1643,15 @@ tfw_cfg_handle_ratio_predyn_opts(TfwCfgEntry *ce, unsigned int *arg_flags)
 	} else if (!strcasecmp(ce->vals[2], "average")) {
 		idx = TFW_PSTATS_IDX_AVG;
 	} else if (!strcasecmp(ce->vals[2], "percentile")) {
+		int r;
+
 		if (ce->val_n < 4) {
 			/* Default percentile. */
 			flags |= TFW_PSTATS_IDX_P90;
 			goto done;
 		}
-		if (tfw_cfg_parse_int(ce->vals[3], &value)) {
-			TFW_ERR_NL("Invalid value: '%s'\n", ce->vals[3]);
-			return -EINVAL;
-		}
+		if ((r = tfw_cfg_parse_int(ce->vals[3], &value)))
+			return r;
 		for (idx = 0; idx < ARRAY_SIZE(tfw_pstats_ith); ++idx) {
 			if (!tfw_pstats_ith[idx])
 				continue;
@@ -1685,13 +1683,13 @@ static int
 tfw_cfg_handle_ratio_predict(TfwCfgEntry *ce,
 			     void **scharg, unsigned int *arg_flags)
 {
-	int i, ret;
+	int i, r;
 	const char *key, *val;
 	bool has_past = false, has_rate = false, has_ahead = false;
 	TfwSchrefPredict arg = { 0 };
 
-	if ((ret = tfw_cfg_handle_ratio_predyn_opts(ce, arg_flags)))
-		return ret;
+	if ((r = tfw_cfg_handle_ratio_predyn_opts(ce, arg_flags)))
+		return r;
 
 	TFW_CFG_ENTRY_FOR_EACH_ATTR(ce, i, key, val) {
 		if (!strcasecmp(key, "past")) {
@@ -1699,30 +1697,24 @@ tfw_cfg_handle_ratio_predict(TfwCfgEntry *ce,
 				TFW_ERR_NL("Duplicate argument: '%s'\n", key);
 				return -EINVAL;
 			}
-			if (tfw_cfg_parse_int(val, &arg.past)) {
-				TFW_ERR_NL("Invalid value: '%s'\n", val);
-				return -EINVAL;
-			}
+			if ((r = tfw_cfg_parse_int(val, &arg.past)))
+				return r;
 			has_past = true;
 		} else if (!strcasecmp(key, "rate")) {
 			if (has_rate) {
 				TFW_ERR_NL("Duplicate argument: '%s'\n", key);
 				return -EINVAL;
 			}
-			if (tfw_cfg_parse_int(val, &arg.rate)) {
-				TFW_ERR_NL("Invalid value: '%s'\n", val);
-				return -EINVAL;
-			}
+			if ((r = tfw_cfg_parse_int(val, &arg.rate)))
+				return r;
 			has_rate = true;
 		} else if (!strcasecmp(key, "ahead")) {
 			if (has_ahead) {
 				TFW_ERR_NL("Duplicate argument: '%s'\n", key);
 				return -EINVAL;
 			}
-			if (tfw_cfg_parse_int(val, &arg.ahead)) {
-				TFW_ERR_NL("Invalid value: '%s'\n", val);
-				return -EINVAL;
-			}
+			if ((r = tfw_cfg_parse_int(val, &arg.ahead)))
+				return r;
 			has_ahead = true;
 		}
 	}

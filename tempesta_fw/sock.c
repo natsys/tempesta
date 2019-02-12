@@ -87,7 +87,8 @@ typedef struct {
 static const char *ss_statename[] = {
 	"Unused",	"Established",	"Syn Sent",	"Syn Recv",
 	"Fin Wait 1",	"Fin Wait 2",	"Time Wait",	"Close",
-	"Close Wait",	"Last ACK",	"Listen",	"Closing"
+	"Close Wait",	"Last ACK",	"Listen",	"Closing",
+	"New Syn Recv"
 };
 #endif
 
@@ -779,6 +780,72 @@ out:
 }
 
 /**
+ * Calculates the appropriate TCP receive buffer space. Same as
+ * tcp_rcv_space_adjust().
+ */
+static void
+ss_rcv_space_adjust(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int time;
+	int copied;
+
+	tcp_mstamp_refresh(tp);
+	time = tcp_stamp_us_delta(tp->tcp_mstamp, tp->rcvq_space.time);
+
+	if (time < (tp->rcv_rtt_est.rtt_us >> 3) || tp->rcv_rtt_est.rtt_us == 0)
+		return;
+
+	copied = tp->copied_seq - tp->rcvq_space.seq;
+	if (copied <= tp->rcvq_space.space)
+		goto new_measure;
+
+	/*
+	 * Socket buffer size is locked (SOCK_RCVBUF_LOCK), we manually control
+	 * its size and can moderate it to gain more speed.
+	 */
+	if (/* sysctl_tcp_moderate_rcvbuf */ true) {
+		int rcvwin, rcvmem, rcvbuf;
+
+		/* minimal window to cope with packet losses, assuming
+		 * steady state. Add some cushion because of small variations.
+		 */
+		rcvwin = (copied << 1) + 16 * tp->advmss;
+
+		/* If rate increased by 25%,
+		 *	assume slow start, rcvwin = 3 * copied
+		 * If rate increased by 50%,
+		 *	assume sender can use 2x growth, rcvwin = 4 * copied
+		 */
+		if (copied >=
+		    tp->rcvq_space.space + (tp->rcvq_space.space >> 2)) {
+			if (copied >=
+			    tp->rcvq_space.space + (tp->rcvq_space.space >> 1))
+				rcvwin <<= 1;
+			else
+				rcvwin += (rcvwin >> 1);
+		}
+
+		rcvmem = SKB_TRUESIZE(tp->advmss + MAX_TCP_HEADER);
+		while (tcp_win_from_space(rcvmem) < tp->advmss)
+			rcvmem += 128;
+
+		rcvbuf = min(rcvwin / tp->advmss * rcvmem, tfw_cfg_cli_rmem);
+		if (rcvbuf > sk->sk_rcvbuf) {
+			sk->sk_rcvbuf = rcvbuf;
+
+			/* Make the window clamp follow along.  */
+			tp->window_clamp = rcvwin;
+		}
+	}
+	tp->rcvq_space.space = copied;
+
+new_measure:
+	tp->rcvq_space.seq = tp->copied_seq;
+	tp->rcvq_space.time = tp->tcp_mstamp;
+}
+
+/**
  * Receive data on TCP socket. Very similar to standard tcp_recvmsg().
  *
  * We can't use standard tcp_read_sock() with our actor callback, because
@@ -801,7 +868,7 @@ ss_tcp_process_data(struct sock *sk)
 			TFW_WARN("recvmsg bug: TCP sequence gap at seq %X"
 				 " recvnxt %X\n",
 				 tp->copied_seq, TCP_SKB_CB(skb)->seq);
-			goto out;
+			goto drop;
 		}
 
 		__skb_unlink(skb, &sk->sk_receive_queue);
@@ -818,7 +885,7 @@ ss_tcp_process_data(struct sock *sk)
 		processed += count;
 
 		if (r < 0)
-			goto out;
+			goto drop;
 		else if (!count)
 			TFW_WARN("recvmsg bug: overlapping TCP segment at %X"
 				 " seq %X rcvnxt %X len %x\n",
@@ -826,12 +893,15 @@ ss_tcp_process_data(struct sock *sk)
 				 skb_len);
 	}
 	droplink = false;
-out:
+drop:
 	/*
 	 * Recalculate an appropriate TCP receive buffer space
 	 * and send ACK to a client with the new window.
 	 */
-	tcp_rcv_space_adjust(sk);
+	if (sk->sk_userlocks & SOCK_RCVBUF_LOCK)
+		ss_rcv_space_adjust(sk);
+	else
+		tcp_rcv_space_adjust(sk);
 	if (processed)
 		tcp_cleanup_rbuf(sk, processed);
 
@@ -855,7 +925,7 @@ ss_tcp_data_ready(struct sock *sk)
 	assert_spin_locked(&sk->sk_lock.slock);
 	TFW_VALIDATE_SK_LOCK_OWNER(sk);
 
-	if (!skb_queue_empty(&sk->sk_error_queue)) {
+	if (unlikely(!skb_queue_empty(&sk->sk_error_queue))) {
 		/*
 		 * Error packet received.
 		 * See sock_queue_err_skb() in linux/net/core/skbuff.c.

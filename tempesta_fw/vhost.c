@@ -1549,15 +1549,14 @@ tfw_cfgop_frang_http_ct_vals(TfwCfgSpec *cs, TfwCfgEntry *ce, FrangCfg *conf)
 static int
 frang_parse_ushort(const char *s, unsigned short *out)
 {
-	int n;
-	if (tfw_cfg_parse_int(s, &n)) {
-		TFW_ERR_NL("frang: http_resp_code_block: "
-			   "\"%s\" isn't a valid value\n", s);
-		return -EINVAL;
-	}
-	if (tfw_cfg_check_range(n, 1, USHRT_MAX))
-		return -EINVAL;
+	int n, r;
+
+	if ((r = tfw_cfg_parse_int(s, &n)))
+		return r;
+	if ((r = tfw_cfg_check_range(n, 1, USHRT_MAX)))
+		return r;
 	*out = n;
+
 	return 0;
 }
 

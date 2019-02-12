@@ -2,7 +2,7 @@
  *		Tempesta FW
  *
  * Copyright (C) 2014 NatSys Lab. (info@natsys-lab.com).
- * Copyright (C) 2015-2018 Tempesta Technologies, Inc.
+ * Copyright (C) 2015-2019 Tempesta Technologies, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by
@@ -76,10 +76,14 @@ enum {
 	/* Whole response is read. */
 	TFW_HTTP_FSM_RESP_MSG		= TFW_GFSM_HTTP_STATE(4),
 
-	/* Run just before locally generated response sending. */
-	TFW_HTTP_FSM_LOCAL_RESP_FILTER	= TFW_GFSM_HTTP_STATE(5),
+	/* Response from backend server is received and ready to be processed. */
+	TFW_HTTP_FSM_RESP_MSG_FWD	= TFW_GFSM_HTTP_STATE(5),
 
-	TFW_HTTP_FSM_RESP_MSG_FWD	= TFW_GFSM_HTTP_STATE(6),
+	/*
+	 * Run just before locally generated response sending.
+	 * This is egress state unlike others, see tfw_http_resp_fwd().
+	 */
+	TFW_HTTP_FSM_LOCAL_RESP_FILTER	= TFW_GFSM_HTTP_STATE(6),
 
 	TFW_HTTP_FSM_DONE	= TFW_GFSM_HTTP_STATE(TFW_GFSM_STATE_LAST)
 };
@@ -236,6 +240,25 @@ enum {
 	/* Singular header presents more than once. */
 	TFW_HTTP_B_FIELD_DUPENTRY,
 
+	/* Streaming flags: Buffered message part only */
+	/* Message is not fully buffered and has a streamed part. */
+	TFW_HTTP_B_STREAM,
+	/* All streamed parts are fully sent, may proceed to the next message. */
+	TFW_HTTP_B_STREAM_DONE,
+	/*
+	 * Error/attack happened while receiving the stream. It'll be never
+	 * received in full.
+	 */
+	TFW_HTTP_B_STREAM_ERR,
+
+	/* Streaming flags: Streamed message part only */
+	/* The message represents stream part, not a full-size one. */
+	TFW_HTTP_B_STREAM_PART,
+	/* It's the last part of the stream. */
+	TFW_HTTP_B_STREAM_LAST_PART,
+	/* Need to buffer the stream for now, don't send it. */
+	TFW_HTTP_B_STREAM_ON_HOLD,
+
 	/* Request flags. */
 	TFW_HTTP_FLAGS_REQ,
 	/* Sticky cookie is found and verified. */
@@ -252,6 +275,11 @@ enum {
 	TFW_HTTP_B_WHITELIST,
 	/* Client was disconnected, drop the request. */
 	TFW_HTTP_B_REQ_DROP,
+	/*
+	 * Force server connection close after response to this request is
+	 * received.
+	 */
+	TFW_HTTP_B_FORCE_CLOSE,
 
 	/* Response flags */
 	TFW_HTTP_FLAGS_RESP,
@@ -290,10 +318,12 @@ typedef struct {
  * @msg			- the base data of an HTTP message;
  * @pool		- message's memory allocation pool;
  * @h_tbl		- table of message's HTTP headers in internal form;
- * @httperr		- HTTP error data used to form an error response;
  * @pair		- the message paired with this one;
  * @req			- the request paired with this response;
  * @resp		- the response paired with this request;
+ * @head		- the buffered part of the streamed message;
+ * @stream		- the streamed part of the streamed message;
+ * @httperr		- HTTP error data used to form an error response;
  * @cache_ctl		- cache control data for a message;
  * @version		- HTTP version (1.0 and 1.1 are only supported);
  * @flags		- message related flags. The flags are tested
@@ -309,6 +339,23 @@ typedef struct {
  *
  * TfwStr members must be the last for efficient scanning.
  *
+ * When the HTTP message is streamed, it can be received and forwarded
+ * simultaneously, so the lock must be taken to prevent access to the
+ * HTTP message from multiple threads. The TfwHttpMsg struct has now such locks
+ * though. Instead it's split into two parts:
+ * - buffered part @head with the full set of headers except trailer ones and
+ *   a body part;
+ * - and proxied continuation part @stream, containing the rest of the body and
+ *   the trailer headers.
+ *
+ * Since HTTP message can't be processed until the full set of headers is
+ * received, buffered part won't be accessed by receiving and forwarding code
+ * path simultaneously and the lock in the buffered path is not required.
+ *
+ * The streamed part may be parsed and forwarded simultaneously, thus
+ * TfwHttpStream implements the lock. Then the streamed part is parsed or
+ * processed it must not modify the buffered part, the buffered part is already
+ * processed or even sent out.
  */
 #define TFW_HTTP_MSG_COMMON						\
 	TfwMsg		msg;						\
@@ -318,6 +365,10 @@ typedef struct {
 		TfwHttpMsg	*pair;					\
 		TfwHttpReq	*req;					\
 		TfwHttpResp	*resp;					\
+	};								\
+	union {								\
+		TfwHttpMsg	*head;					\
+		TfwHttpStream	*stream;				\
 	};								\
 	TfwHttpError	httperr;					\
 	TfwCacheControl	cache_ctl;					\
@@ -435,6 +486,37 @@ struct tfw_http_resp_t {
 #define TFW_HTTP_RESP_STR_START(r)	__MSG_STR_START(r)
 #define TFW_HTTP_RESP_STR_END(r)	((&(r)->body) + 1)
 
+/**
+ * Streamed part of response or request.
+ *
+ * @stream_lock		- lock between parse/stream operations;
+ * @rcv_conn		- connection receiving the stream;
+ * @off			- offset from the buffer part end;
+ * @proc_off		- offset of unprocessed data in @body
+ *
+ * It's not always possible to stream the message as soon as it arrives,
+ * receiver may not be ready for this particular message, e.g. if there is one
+ * more streamed and not fully received message in its queue. So the streamed
+ * message is actually get buffered until the receiver is ready. There are also
+ * some cases when a more of the message must be buffered before is can be
+ * processed, e.g. trailer header processing.
+ *
+ * When the streamed part is buffered, the @body member becomes longer during
+ * parsing operations, so @proc_off shows how many bytes of the body was
+ * already processed.
+ *
+ * The stream part may contain trailer header part. RFC allows intermediates
+ * to ignore the headers, but Tempesta still needs to validate the headers
+ * format and probably modify them.
+ */
+struct tfw_http_msg_stream_t {
+	TFW_HTTP_MSG_COMMON;
+	spinlock_t		stream_lock;
+	TfwConn			*rcv_conn;
+	size_t			off;
+	size_t			proc_off;
+};
+
 #define __FOR_EACH_HDR_FIELD(pos, end, msg, soff, eoff)			\
 	for ((pos) = &(msg)->h_tbl->tbl[soff], 				\
 	     (end) = &(msg)->h_tbl->tbl[eoff];				\
@@ -515,6 +597,12 @@ void tfw_http_resp_fwd(TfwHttpResp *resp);
 void tfw_http_resp_build_error(TfwHttpReq *req);
 int tfw_cfgop_parse_http_status(const char *status, int *out);
 void tfw_http_hm_srv_send(TfwServer *srv, char *data, unsigned long len);
+
+static inline bool
+tfw_http_msg_is_streamed(TfwHttpMsg *hm)
+{
+	return test_bit(TFW_HTTP_B_STREAM, hm->flags);
+}
 
 /*
  * Functions to send an HTTP error response to a client.
