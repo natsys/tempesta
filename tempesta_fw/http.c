@@ -2601,6 +2601,42 @@ tfw_http_expand_hdr_date(TfwHttpResp *resp)
 	return r;
 }
 
+int
+tfw_http_expand_hdr_clen(TfwHttpResp *resp, size_t len)
+{
+	int r;
+	struct sk_buff **skb_head = &resp->msg.skb_head;
+	TfwHttpTransIter *mit = &resp->mit;
+	char *buf = *this_cpu_ptr(&g_buf);
+	TfwStr h_clen = {
+		.chunks = (TfwStr []){
+			TFW_STR_STRING(S_F_CONTENT_LENGTH),
+			{ .data = buf, .len = 0 },
+			TFW_STR_STRING(S_CRLF),
+		},
+		.len = SLEN(S_F_CONTENT_LENGTH) + SLEN(S_CRLF),
+		.nchunks = 3
+	};
+	TfwStr *len_str = __TFW_STR_CH(&h_clen, 1);
+
+	if (!len)
+		return 0;
+
+	len_str->len = tfw_ultoa(len, len_str->data, TFW_ULTOA_BUF_SIZ);
+	if (!len_str->len)
+		return -EINVAL;
+	h_clen.len += len_str->len;
+	r = tfw_http_msg_expand_data(&mit->iter, skb_head, &h_clen, NULL);
+	if (r)
+		T_ERR("Unable to expand resp [%p] with 'content-length:' "
+		      "header\n", resp);
+	else
+		T_DBG2("Expanded resp [%p] with 'content-length:' header\n",
+		       resp);
+
+	return r;
+}
+
 /**
  * Connection is to be closed after response for the request @req is forwarded
  * to the client. Don't process new requests from the client and update
@@ -3564,8 +3600,13 @@ tfw_http_adjust_resp(TfwHttpResp *resp)
 			return r;
 	}
 
-	return TFW_HTTP_MSG_HDR_XFRM(hm, "Server", TFW_NAME "/" TFW_VERSION,
+	r = TFW_HTTP_MSG_HDR_XFRM(hm, "Server", TFW_NAME "/" TFW_VERSION,
 				     TFW_HTTP_HDR_SERVER, 0);
+	if (r < 0)
+		return r;
+
+	/* Frame response if framing information was lost or absent. */
+	return tfw_http_msg_frame_h1_msg(hm);
 }
 
 /*
@@ -5657,34 +5698,27 @@ tfw_http_resp_cache(TfwHttpMsg *hmresp)
 
 /*
  * Finish a response that is terminated by closing the connection.
+ *
+ * Http/1 response is terminated by connection close and lacks of framing
+ * information. H2 connections have their own framing happening just before
+ * forwarding message to network, but h1 connections still require explicit
+ * framing. Don't add framing now, @tfw_http_adjust_resp() will handle it.
  */
 static void
 tfw_http_resp_terminate(TfwHttpMsg *hm)
 {
 	TfwFsmData data;
-	int r = 0;
 
-	/*
-	 * Add absent message framing information. It's possible to add a
-	 * 'Content-Length: 0' header, if the Transfer-Encoding header is not
-	 * set, but keep more generic solution and transform to chunked.
-	 * It's the only possible modification for future proxy mode.
-	 * If the framing information can't be added, then close client
-	 * connection after response is forwarded.
-	 */
-	if (!test_bit(TFW_HTTP_B_CHUNKED_APPLIED, hm->flags))
-		r = tfw_http_msg_to_chunked(hm);
-	else
-		set_bit(TFW_HTTP_B_CONN_CLOSE, hm->req->flags);
-
-	if (r) {
-		TfwHttpReq *req = hm->req;
-
-		tfw_http_popreq(hm, false);
-		/* The response is freed by tfw_http_req_block(). */
-		tfw_http_req_block(req, 502, "response blocked: filtered out");
-		TFW_INC_STAT_BH(serv.msgs_filtout);
-		return;
+	if (unlikely(!TFW_MSG_H2(hm->req))) {
+		/*
+		 * A sender MUST NOT apply chunked more than once
+		 * to a message body (i.e., chunking an already
+		 * chunked message is not allowed). RFC 7230 3.3.1.
+		 */
+		if (!test_bit(TFW_HTTP_B_CHUNKED_APPLIED, hm->flags))
+			__set_bit(TFW_HTTP_B_CHUNKED, hm->flags);
+		else
+			set_bit(TFW_HTTP_B_CONN_CLOSE, hm->req->flags);
 	}
 
 	/*
@@ -5789,6 +5823,16 @@ next_msg:
 			goto bad_msg;
 		}
 		/*
+		 * Cut extra data found by parser and never intended to be
+		 * forwarded to client, such as chunked encoding. It can be cut
+		 * off later, but just do it now while all the data sits in the
+		 * last skb.
+		 */
+		if (tfw_http_msg_del_parsed_cuts(hmresp, false)) {
+			TFW_INC_STAT_BH(serv.msgs_otherr);
+			goto bad_msg;
+		}
+		/*
 		 * TFW_POSTPONE status means that parsing succeeded
 		 * but more data is needed to complete it. Lower layers
 		 * just supply data for parsing. They only want to know
@@ -5827,6 +5871,14 @@ next_msg:
 	}
 	else {
 		skb = NULL;
+	}
+	/*
+	 * Cut everything from response, which we don't want to pass, e.g.
+	 * chunked encoding.
+	 */
+	if (tfw_http_msg_del_parsed_cuts(hmresp, true)) {
+		TFW_INC_STAT_BH(serv.msgs_otherr);
+		goto bad_msg;
 	}
 
 	/*

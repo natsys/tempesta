@@ -1425,6 +1425,7 @@ TEST(http_parser, crlf_trailer)
 {
 	unsigned int id;
 	DEFINE_TFW_STR(s_custom, "Custom-Hdr:");
+	DEFINE_TFW_STR(s_resp_body, "abcde");
 
 	/*
 	 * Use a trick with different CRLF length to differentiate
@@ -1443,7 +1444,7 @@ TEST(http_parser, crlf_trailer)
 		id = tfw_http_msg_hdr_lookup((TfwHttpMsg *)req, &s_custom);
 
 		EXPECT_TRUE(id == TFW_HTTP_HDR_RAW);
-		EXPECT_TRUE(req->body.len == 12);
+		EXPECT_EQ(req->body.len, 12);
 		EXPECT_TRUE(req->crlf.len == 1);
 	}
 
@@ -1459,9 +1460,18 @@ TEST(http_parser, crlf_trailer)
 		/* 'Custom-Hdr:' is the first raw header in this example. */
 		id = tfw_http_msg_hdr_lookup((TfwHttpMsg *)resp, &s_custom);
 
-		EXPECT_TRUE(id == TFW_HTTP_HDR_RAW);
-		EXPECT_TRUE(resp->body.len == 13);
-		EXPECT_TRUE(resp->crlf.len == 1);
+		EXPECT_EQ(id, TFW_HTTP_HDR_RAW);
+		EXPECT_EQ(resp->crlf.len, 1);
+
+		/*
+		 * Chunked encoding is removed for responses in two stages:
+		 * - body is parsed without chunk decriptors,
+		 * - both 'chunked' token and chunk descriptors are erased
+		 *   from the message.
+		 * Only first step was done at this moment.
+		 */
+		EXPECT_EQ(resp->body.len, 5);
+		EXPECT_OK(tfw_stricmp(&resp->body, &s_resp_body));
 	}
 }
 
@@ -1791,6 +1801,7 @@ TEST(http_parser, chunked)
 {
 	TfwHttpHdrTbl *ht;
 	TfwStr h_connection;
+	DEFINE_TFW_STR(s_resp_body, "abcde");
 
 	FOR_REQ("POST / HTTP/1.1\r\n"
 		"Host:\r\n"
@@ -1808,7 +1819,7 @@ TEST(http_parser, chunked)
 	{
 		ht = req->h_tbl;
 
-		EXPECT_TRUE(req->body.len == 46);
+		EXPECT_EQ(req->body.len, 46);
 
 		tfw_http_msg_srvhdr_val(&ht->tbl[TFW_HTTP_HDR_CONNECTION],
 					TFW_HTTP_HDR_CONNECTION,
@@ -1828,13 +1839,21 @@ TEST(http_parser, chunked)
 	{
 		ht = resp->h_tbl;
 
-		EXPECT_TRUE(resp->body.len == 17);
-
 		tfw_http_msg_srvhdr_val(&ht->tbl[TFW_HTTP_HDR_CONNECTION],
 					TFW_HTTP_HDR_CONNECTION,
 					&h_connection);
 		EXPECT_TRUE(tfw_str_eq_cstr(&h_connection, "keep-alive",
 					    sizeof("keep-alive") - 1, 0));
+
+		/*
+		 * Chunked encoding is removed for responses in two stages:
+		 * - body is parsed without chunk decriptors,
+		 * - both 'chunked' token and chunk descriptors are erased
+		 *   from the message.
+		 * Only first step was done at this moment.
+		 */
+		EXPECT_EQ(resp->body.len, 5);
+		EXPECT_OK(tfw_stricmp(&resp->body, &s_resp_body));
 	}
 
 	EXPECT_BLOCK_REQ("GET / HTTP/1.1\r\n"

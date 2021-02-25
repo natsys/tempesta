@@ -149,10 +149,10 @@ tfw_h2_msg_hdr_add(TfwHttpResp *resp, char *name, size_t nlen, char *val,
 	return tfw_hpack_encode(resp, &hdr, TFW_H2_TRANS_ADD, true);
 }
 
-int __tfw_http_msg_add_str_data(TfwHttpMsg *hm, TfwStr *str, void *data,
-				size_t len, struct sk_buff *skb);
+int __tfw_http_msg_add_str_data(TfwHttpMsg *hm, TfwPool *pool, TfwStr *str,
+				void *data, size_t len, struct sk_buff *skb);
 #define tfw_http_msg_add_str_data(hm, str, data, len)			\
-	__tfw_http_msg_add_str_data(hm, str, data, len,			\
+	__tfw_http_msg_add_str_data(hm, hm->pool, str, data, len,	\
 				    ss_skb_peek_tail(&hm->msg.skb_head))
 
 unsigned int tfw_http_msg_hdr_lookup(TfwHttpMsg *hm, const TfwStr *hdr);
@@ -170,7 +170,8 @@ int tfw_http_msg_hdr_xfrm(TfwHttpMsg *hm, char *name, size_t n_len,
 
 int tfw_http_msg_del_str(TfwHttpMsg *hm, TfwStr *str);
 int tfw_http_msg_del_hbh_hdrs(TfwHttpMsg *hm);
-int tfw_http_msg_to_chunked(TfwHttpMsg *hm);
+int tfw_http_msg_frame_h1_msg(TfwHttpMsg *hm);
+int tfw_http_msg_del_parsed_cuts(TfwHttpMsg *hm, bool parsing_done);
 
 int tfw_http_msg_setup(TfwHttpMsg *hm, TfwMsgIter *it, size_t data_len,
 		       unsigned int tx_flags);

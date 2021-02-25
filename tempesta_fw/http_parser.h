@@ -93,6 +93,11 @@ typedef struct {
  *		  hop-by-hop
  * @_date	- currently parsed http date value;
  * @month_int	- accumulator for parsing of month;
+ * @cut		- data to be evicted from the message, grabbed at parsing stage;
+ * @pool	- pool for @cut, since @cut is filled during parsing of other
+ *		  message fragments, it would block efficient reallocations of
+ *		  'good' message parts. Allocated once per connection, thus
+ *		  need to return allocated memory once @cut is freed.
  */
 typedef struct {
 	unsigned short			to_go;
@@ -120,6 +125,8 @@ typedef struct {
 	TfwStr				_tmp_chunk;
 	TfwStr				hdr;
 	TfwHttpHbhHdrs			hbh_parser;
+	TfwStr				cut;
+	TfwPool				*pool;
 } TfwHttpParser;
 
 void tfw_http_init_parser_req(TfwHttpReq *req);

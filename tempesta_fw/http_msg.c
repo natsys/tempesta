@@ -630,7 +630,7 @@ done:
  * that just now by facing CRLF at the start of the current data chunk.
  */
 int
-__tfw_http_msg_add_str_data(TfwHttpMsg *hm, TfwStr *str, void *data,
+__tfw_http_msg_add_str_data(TfwHttpMsg *hm, TfwPool *pool, TfwStr *str, void *data,
 			    size_t len, struct sk_buff *skb)
 {
 	if (WARN_ON_ONCE(str->flags & (TFW_STR_DUPLICATE | TFW_STR_COMPLETE)))
@@ -647,7 +647,7 @@ __tfw_http_msg_add_str_data(TfwHttpMsg *hm, TfwStr *str, void *data,
 		BUG_ON(!str->len);
 	}
 	else if (likely(len)) {
-		TfwStr *sn = tfw_str_add_compound(hm->pool, str);
+		TfwStr *sn = tfw_str_add_compound(pool, str);
 		if (!sn) {
 			T_WARN("Cannot grow HTTP data string\n");
 			return -ENOMEM;
@@ -981,61 +981,78 @@ tfw_http_msg_del_hbh_hdrs(TfwHttpMsg *hm)
  * to its beginning.
  */
 static int
-tfw_http_msg_body_xfrm(TfwHttpMsg *hm, const TfwStr *data, bool append)
+tfw_http_msg_body_xfrm(TfwHttpMsg *hm, const TfwStr *data, bool append,
+		       bool after_trailer)
 {
 	int r;
-	TfwStr it = {};
-	char *st = append
-		? (TFW_STR_CURR(&hm->body)->data + TFW_STR_CURR(&hm->body)->len)
-		: (TFW_STR_CHUNK(&hm->body, 0)->data);
-	/*
-	 * Last skb in the message skb list is the last skb of the body,
-	 * it's safe to add more chunks there. There are no trailer headers
-	 * since trailer may appear only after chunked body, but the message
-	 * wasn't in chunked encoding before.
-	 */
-	struct sk_buff *skb = append
-		? ss_skb_peek_tail(&hm->msg.skb_head)
-		: hm->body.skb;
-	/*
-	 * TODO: #498. During stream forwarding the message is to be forwarded
-	 * skb by skb without full assembling in memory and chunked encoding
-	 * is to be applied on the fly. It's crucial to write last-chunk at the
-	 * skb->tail to reuse allocation overhead and avoid possible skb
-	 * allocations.
-	 */
-	r = ss_skb_get_room(hm->msg.skb_head, skb, st, data->len, &it);
-	if (r)
-		return r;
+	char *st;
+	TfwMsgIter it = {.skb_head = hm->msg.skb_head, /* .frag not used. */
+			 .skb = hm->body.skb};
 
-	if ((r = tfw_strcpy(&it, data)))
-		return r;
-	r = tfw_str_insert(hm->pool, &hm->body, &it,
-			   append ? hm->body.nchunks : 0);
-	if (r) {
-		T_WARN("Can't concatenate body %.*s with %.*s\n",
-		       PR_TFW_STR(&hm->body), PR_TFW_STR(data));
-		return r;
+	if (!append) {
+		/* Insert string just at front of the body. */
+		st = TFW_STR_CHUNK(&hm->body, 0)->data;
+	}
+	else if (likely(!test_bit(TFW_HTTP_B_CHUNKED_TRAILER, hm->flags)
+			|| after_trailer))
+	{
+		/*
+		 * Trailing CRLF after chunked body (chunked trailed) was cut
+		 * off, restore it back at very end of the body.
+		 */
+		struct skb_shared_info *shi;
+		it.skb = ss_skb_peek_tail(&hm->msg.skb_head);
+		shi = skb_shinfo(it.skb);
+		if (shi->nr_frags) {
+			skb_frag_t *f = &shi->frags[shi->nr_frags - 1];
+			st = skb_frag_address(f) + skb_frag_size(f);
+		}
+		else {
+			st = it.skb->data + skb_headlen(it.skb);
+		}
+	}
+	else {
+		st = TFW_STR_CURR(&hm->body)->data + TFW_STR_CURR(&hm->body)->len;
+		if ((r = tfw_http_iter_set_at(&it, st)))
+			return r;
 	}
 
-	return 0;
+	/* The modifications are done just befor push message into network,
+	 * don't bother ourselves with hm stracture maintaining.
+	 */
+	return tfw_http_msg_insert(&it, &st, data);
 }
 
 /**
- * Transform message to chunked encoding.
+ * The http1 message (response) is about to be forwarded. If it lacks of framing
+ * information add it. The message is fully assembled, so try to use as little
+ * modifications as possible.
  */
 int
-tfw_http_msg_to_chunked(TfwHttpMsg *hm)
+tfw_http_msg_frame_h1_msg(TfwHttpMsg *hm)
 {
-	int r;
+	int r = 0;
 	const DEFINE_TFW_STR(chunked_body_end, "\r\n0\r\n\r\n");
 	const DEFINE_TFW_STR(zero_body_end, "0\r\n\r\n");
-	const TfwStr *body_end = &chunked_body_end;
+	const DEFINE_TFW_STR(crlf, "\r\n");
+	TfwStr body_end = chunked_body_end;
 
-	r = TFW_HTTP_MSG_HDR_XFRM(hm, "Transfer-Encoding", "chunked",
-				  TFW_HTTP_HDR_TRANSFER_ENCODING, 1);
-	if (r)
-		return r;
+	/*
+	 * If chunked flag is set then either message was in chunked encoding
+	 * or it was terminated by connection close. If 'Transfer-Encoding'
+	 * header is marked as hop-by-hop, it doesn't require modification,
+	 * otherwize need to append chunked as final coding.
+	 */
+	if (!test_bit(TFW_HTTP_B_CHUNKED, hm->flags))
+		return 0;
+	if (!(hm->h_tbl->tbl[TFW_HTTP_HDR_TRANSFER_ENCODING].flags
+	      & TFW_STR_HBH_HDR))
+	{
+		r = TFW_HTTP_MSG_HDR_XFRM(hm, "transfer-encoding", "chunked",
+					  TFW_HTTP_HDR_TRANSFER_ENCODING, 1);
+		if (r)
+			return r;
+	}
 
 	if (hm->body.len) {
 		char data[TFW_ULTOA_BUF_SIZ + 2] = {0};
@@ -1047,21 +1064,83 @@ tfw_http_msg_to_chunked(TfwHttpMsg *hm)
 		*(short *)(sz.data + sz.len) = 0x0a0d; /* CRLF, '\r\n' */
 		sz.len += 2;
 
-		if ((r = tfw_http_msg_body_xfrm(hm, &sz, false)))
+		if ((r = tfw_http_msg_body_xfrm(hm, &sz, false, false)))
 			return r;
 	}
 	else {
 		hm->body.data = hm->crlf.data + hm->crlf.len;
-		body_end = &zero_body_end;
+		body_end = zero_body_end;
 	}
 
-	if ((r = tfw_http_msg_body_xfrm(hm, body_end, true))) {
+	if (unlikely(test_bit(TFW_HTTP_B_CHUNKED_TRAILER, hm->flags)))
+		body_end.len -= 2;
+	if ((r = tfw_http_msg_body_xfrm(hm, &body_end, true, false)))
 		return r;
+	if (unlikely(test_bit(TFW_HTTP_B_CHUNKED_TRAILER, hm->flags))) {
+		if ((r = tfw_http_msg_body_xfrm(hm, &crlf, true, true)))
+			return r;
 	}
-
-	__set_bit(TFW_HTTP_B_CHUNKED, hm->flags);
 
 	return 0;
+}
+
+int
+tfw_http_msg_del_parsed_cuts(TfwHttpMsg *hm, bool parsing_done)
+{
+	int r;
+	TfwStr cut, *c, *end, *hdr;
+
+	cut = hm->stream->parser.cut;
+	if (!hm->stream->parser.pool || TFW_STR_EMPTY(&cut))
+		return 0;
+
+	if ((r = tfw_http_msg_del_str(hm, &hm->stream->parser.cut)))
+		return r;
+	else
+		hm->msg.len -= cut.len;
+	if (cut.nchunks)
+		tfw_pool_free(hm->stream->parser.pool, cut.data,
+			      cut.nchunks * sizeof(TfwStr));
+	/*
+	 * Message is fully parsed, remove all other unwanted data: 'chunked'
+	 * encoding token from Transfer-Encoding header. We remove it only if
+	 * it's a last coding.
+	 */
+	if (!parsing_done || !test_bit(TFW_HTTP_B_CHUNKED, hm->flags))
+		return 0;
+
+	/*
+	 * The whole header can be removed. Don't remove it, only mark as
+	 * hop-by-hop header: such headers are ignored while saved into cache
+	 * and never forwarded to h2 clients. Just avoid extra fragmentation
+	 * now.
+	 */
+	hdr = &hm->h_tbl->tbl[TFW_HTTP_HDR_TRANSFER_ENCODING];
+	if (!test_bit(TFW_HTTP_B_TE_EXTRA, hm->flags)) {
+		hdr->flags |= TFW_STR_HBH_HDR;
+		return 0;
+	}
+	/*
+	 * Multiple transfer encodings: remove only final 'chunked'. Although
+	 * RFC 7540 encorage us to remove the header we can't: client won't
+	 * be able to deduce paylod coding, e.g. gzip.
+	 */
+	if (TFW_STR_DUP(hdr)) {
+		hdr = hdr->chunks + hdr->nchunks - 1;
+	}
+
+	cut = *hdr;
+	end = cut.chunks + cut.nchunks;
+	for (c = cut.chunks; c != end; ++c)
+		if (!(c->flags & TFW_STR_NAME)) {
+			++cut.chunks;
+			--cut.nchunks;
+			cut.len -= c->len;
+		}
+	hdr->nchunks -= cut.nchunks;
+	hdr->len -= cut.len;
+
+	return tfw_http_msg_del_str(hm, &cut);
 }
 
 /**
@@ -1159,8 +1238,8 @@ this_chunk:
 
 		memcpy_fast(p, c->data + c_off, n_copy);
 		if (field && n_copy
-		    && __tfw_http_msg_add_str_data(hm, field, p, n_copy,
-						   it->skb))
+		    && __tfw_http_msg_add_str_data(hm, hm->pool, field, p,
+						   n_copy, it->skb))
 		{
 			return -ENOMEM;
 		}

@@ -1656,8 +1656,8 @@ do {									\
 } while (0)
 
 #define FIXUP_DATA(str, data, len)					\
-	if (__tfw_http_msg_add_str_data((TfwHttpMsg *)resp, str, data,	\
-					len, NULL))			\
+	if (__tfw_http_msg_add_str_data((TfwHttpMsg *)resp, resp->pool, \
+					str, data, len, NULL))		\
 	{								\
 		r = T_DROP;						\
 		goto out;						\

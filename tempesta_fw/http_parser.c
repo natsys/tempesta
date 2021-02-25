@@ -242,6 +242,77 @@ do {									\
 	goto to;							\
 } while (0)
 
+#define __body_fixup_append(n, field)					\
+do {									\
+	TfwStr *l = TFW_STR_CURR(field);				\
+	if (l->data + l->len == (char *)p) {				\
+		l->len += n;						\
+		if (!TFW_STR_PLAIN(field))				\
+			(field)->len += n;				\
+	} else {							\
+		if (TFW_STR_EMPTY(field))				\
+			tfw_http_msg_set_str_data(msg, field, p);	\
+		__msg_field_fixup_pos(field, p, n);			\
+	}								\
+} while (0)
+
+#define __FSM_MOVE_body_fixup(to, n, field)				\
+do {									\
+	__body_fixup_append(n, field);					\
+	p += n;								\
+	if (unlikely(__data_off(p) >= len)) {				\
+		parser->state = &&to;					\
+		__FSM_EXIT(TFW_POSTPONE);				\
+	}								\
+	goto to;							\
+} while (0)
+
+#define __FSM_MOVE_body_chunk(to, n)					\
+do {									\
+	__FSM_MOVE_body_fixup(to, n, &msg->body);			\
+} while (0)
+
+#define __FSM_MOVE_body_chunk_desc(to, n)				\
+do {									\
+	if (TFW_CONN_TYPE(msg->conn) & Conn_Srv) {			\
+		__FSM_MOVE_body_fixup(to, n, &msg->stream->parser.cut);	\
+	} else {							\
+		__FSM_MOVE_body_fixup(to, n, &msg->body);		\
+	}								\
+} while (0)
+
+#define __body_chunk_desc_append(n)					\
+do {									\
+	if (TFW_CONN_TYPE(msg->conn) & Conn_Srv) {			\
+		__body_fixup_append(n, &msg->stream->parser.cut);	\
+	} else {							\
+		__body_fixup_append(n, &msg->body);			\
+	}								\
+} while (0)
+
+/*
+ * CRLF after chunked request body is not tracked by any TfwStr, but it's
+ * cut off from responses.
+ */
+#define __FSM_MOVE_nofixup_or_cut(to)					\
+do {									\
+	if (TFW_CONN_TYPE(msg->conn) & Conn_Srv) {			\
+		__FSM_MOVE_body_fixup(to, 1, &msg->stream->parser.cut);	\
+	} else {							\
+		__FSM_MOVE_nofixup(to);					\
+	}								\
+} while (0)
+
+/*
+ * CRLF after chunked request body is not tracked by any TfwStr, but it's
+ * cut off from responses.
+ */
+#define __crlf_nofixup_or_cut(n)						\
+do {									\
+	if (TFW_CONN_TYPE(msg->conn) & Conn_Srv) {			\
+		__body_fixup_append(n, &msg->stream->parser.cut);	\
+	}								\
+} while (0)
 /*
  * __FSM_I_* macros are intended to help with parsing of message
  * header values. That is done with separate, nested, or interior
@@ -844,7 +915,7 @@ mark_trailer_hdr(TfwHttpMsg *hm, TfwStr *hdr)
  * @TfwStr{} type and variable @field is used (instead of hard coded
  * header field); besides, @finish parameter is not used in this macro.
  */
-#define TRY_STR_LAMBDA_fixup(str, field, lambda, curr_st, next_st)	\
+#define TRY_STR_LAMBDA_fixup_f(str, field, lambda, curr_st, next_st, flag) \
 	BUG_ON(!TFW_STR_PLAIN(str));					\
 	if (!chunk->data)						\
 		chunk->data = p;					\
@@ -854,15 +925,23 @@ mark_trailer_hdr(TfwHttpMsg *hm, TfwStr *hdr)
 		if (chunk->len == (str)->len) {				\
 			lambda;						\
 			TRY_STR_INIT();					\
-			__FSM_I_MOVE_fixup_f(next_st, __fsm_n, field, 0);\
+			__FSM_I_MOVE_fixup_f(next_st, __fsm_n, field, flag);\
 		}							\
 		__msg_field_fixup_pos(field, p, __fsm_n);		\
+		if (flag)						\
+			__FSM_I_field_chunk_flags(field, flag);		\
 		parser->_i_st = &&curr_st;				\
 		return CSTR_POSTPONE;					\
 	}
 
+#define TRY_STR_LAMBDA_fixup(str, field, lambda, curr_st, next_st)	\
+	TRY_STR_LAMBDA_fixup_f(str, field, lambda, curr_st, next_st, 0)
+
 #define TRY_STR_fixup(str, curr_st, next_st)				\
-	TRY_STR_LAMBDA_fixup(str, &parser->hdr, { }, curr_st, next_st)
+	TRY_STR_LAMBDA_fixup_f(str, &parser->hdr, { }, curr_st, next_st, 0)
+
+#define TRY_STR_fixup_flag(str, curr_st, next_st, flag)			\
+	TRY_STR_LAMBDA_fixup_f(str, &parser->hdr, { }, curr_st, next_st, flag)
 
 /*
  * Headers EOL processing. Allow only LF and CRLF as a newline delimiters.
@@ -906,7 +985,7 @@ __FSM_STATE(RGen_CR, hot) {						\
 do {									\
 	if (unlikely(c == '\r')) {					\
 		if (msg->crlf.flags & TFW_STR_COMPLETE)			\
-			__FSM_MOVE_nofixup(RGen_CRLFCR);		\
+			__FSM_MOVE_nofixup_or_cut(RGen_CRLFCR);		\
 		if (!msg->crlf.data)					\
 			/* The end of the headers part. */		\
 			tfw_http_msg_set_str_data(msg, &msg->crlf, p);	\
@@ -924,6 +1003,7 @@ do {									\
 			__FSM_JMP(RGen_BodyInit);			\
 		}							\
 		parser->state = &&RGen_Hdr;				\
+		__crlf_nofixup_or_cut(1);				\
 		FSM_EXIT(TFW_PASS);					\
 	}								\
 } while (0)
@@ -942,6 +1022,7 @@ __FSM_STATE(RGen_CRLFCR, hot) {						\
 		__FSM_JMP(RGen_BodyInit);				\
 	}								\
 	parser->state = &&RGen_CRLFCR;					\
+	__crlf_nofixup_or_cut(1);					\
 	FSM_EXIT(TFW_PASS);						\
 }
 
@@ -1119,7 +1200,7 @@ __FSM_STATE(RGen_BodyInit) {						\
 									\
 	/* There's no body. */						\
 	if (test_bit(TFW_HTTP_B_VOID_BODY, msg->flags)) 		\
-		goto no_body;			\
+		goto no_body;						\
 	if (!TFW_STR_EMPTY(&tbl[TFW_HTTP_HDR_TRANSFER_ENCODING])) {	\
 		/*							\
 		 * According to RFC 7230 3.3.3 p.3, more strict		\
@@ -1189,10 +1270,10 @@ __FSM_STATE(RGen_BodyReadChunk, __VA_ARGS__) {				\
 	__fsm_sz = min_t(long, parser->to_read, __data_remain(p));	\
 	parser->to_read -= __fsm_sz;					\
 	if (parser->to_read)						\
-		__FSM_MOVE_nf(RGen_BodyReadChunk, __fsm_sz, &msg->body); \
+		__FSM_MOVE_body_chunk(RGen_BodyReadChunk, __fsm_sz);	\
 	if (test_bit(TFW_HTTP_B_CHUNKED, msg->flags)) {			\
 		parser->to_read = -1;					\
-		__FSM_MOVE_nf(RGen_BodyEoL, __fsm_sz, &msg->body);	\
+		__FSM_MOVE_body_chunk(RGen_BodyEoL, __fsm_sz);		\
 	}								\
 	/* We've fully read Content-Length bytes. */			\
 	if (tfw_http_msg_add_str_data(msg, &msg->body, p, __fsm_sz))	\
@@ -1210,7 +1291,7 @@ __FSM_STATE(RGen_BodyChunkLen, __VA_ARGS__) {				\
 	       __fsm_sz, __fsm_n, parser->_acc);			\
 	switch (__fsm_n) {						\
 	case CSTR_POSTPONE:						\
-		__FSM_MOVE_nf(RGen_BodyChunkLen, __fsm_sz, &msg->body);	\
+		__FSM_MOVE_body_chunk_desc(RGen_BodyChunkLen, __fsm_sz);\
 	case CSTR_BADLEN:						\
 	case CSTR_NEQ:							\
 		TFW_PARSER_BLOCK(RGen_BodyChunkLen);			\
@@ -1218,31 +1299,29 @@ __FSM_STATE(RGen_BodyChunkLen, __VA_ARGS__) {				\
 		parser->to_read = parser->_acc;				\
 		parser->_acc = 0;					\
 		parser->_cnt = 0;					\
-		__FSM_MOVE_nf(RGen_BodyChunkExt, __fsm_n, &msg->body);	\
+		__FSM_MOVE_body_chunk_desc(RGen_BodyChunkExt, __fsm_n);	\
 	}								\
 }									\
 __FSM_STATE(RGen_BodyChunkExt, __VA_ARGS__) {				\
 	if (unlikely(c == ';' || c == '=' || IS_TOKEN(c)))		\
-		__FSM_MOVE_f(RGen_BodyChunkExt, &msg->body);		\
+		__FSM_MOVE_body_chunk_desc(RGen_BodyChunkExt, 1);	\
 	/* Fall through. */						\
 }									\
 __FSM_STATE(RGen_BodyEoL, __VA_ARGS__) {				\
 	if (likely(c == '\r'))						\
-		__FSM_MOVE_f(RGen_BodyCR, &msg->body);			\
+		__FSM_MOVE_body_chunk_desc(RGen_BodyCR, 1);		\
 	/* Fall through. */						\
 }									\
 __FSM_STATE(RGen_BodyCR, __VA_ARGS__) {					\
 	if (unlikely(c != '\n'))					\
 		TFW_PARSER_BLOCK(RGen_BodyCR);				\
 	if (parser->to_read)						\
-		__FSM_MOVE_f(RGen_BodyChunk, &msg->body);		\
+		__FSM_MOVE_body_chunk_desc(RGen_BodyChunk, 1);		\
 	/*								\
 	 * We've fully read the chunked body.				\
 	 * Add everything and the current character.			\
 	 */								\
-	if (tfw_http_msg_add_str_data(msg, &msg->body, data,		\
-				      __data_off(p) + 1))		\
-		TFW_PARSER_BLOCK(RGen_BodyCR);				\
+	__body_chunk_desc_append(1);					\
 	msg->body.flags |= TFW_STR_COMPLETE;				\
 	/* Process the trailer-part. */					\
 	__FSM_MOVE_nofixup(RGen_Hdr);					\
@@ -1834,6 +1913,10 @@ STACK_FRAME_NON_STANDARD(__req_parse_content_type);
 
 /**
  * Parse Transfer-Encoding header value, RFC 2616 14.41 and 3.6.
+ *
+ * We cut chunked encoding for responses, since the chunked encoding is not
+ * allowed over h2 connections. We can't strip the 'chunked' token right at time
+ * we see it, because it may be not final encoding, see RFC 7230 3.3.1.
  */
 static int
 __parse_transfer_encoding(TfwHttpMsg *hm, unsigned char *data, size_t len,
@@ -1861,14 +1944,13 @@ __parse_transfer_encoding(TfwHttpMsg *hm, unsigned char *data, size_t len,
 	}
 
 	__FSM_STATE(I_TransEncodTok) {
-
 		/*
 		 * A sender MUST NOT apply chunked more than once
 		 * to a message body (i.e., chunking an already
 		 * chunked message is not allowed). RFC 7230 3.3.1.
 		 */
-		TRY_STR_fixup(&TFW_STR_STRING("chunked"), I_TransEncodTok,
-			      I_TransEncodChunked);
+		TRY_STR_fixup_flag(&TFW_STR_STRING("chunked"), I_TransEncodTok,
+				   I_TransEncodChunked, TFW_STR_NAME);
 		TRY_STR_INIT();
 		__FSM_I_JMP(I_TransEncodOther);
 	}
@@ -1897,6 +1979,7 @@ __parse_transfer_encoding(TfwHttpMsg *hm, unsigned char *data, size_t len,
 	 * compress;
 	 */
 	__FSM_STATE(I_TransEncodOther) {
+		__set_bit(TFW_HTTP_B_TE_EXTRA, msg->flags);
 		__FSM_I_MATCH_MOVE_fixup(token, I_TransEncodOther, 0);
 		c = *(p + __fsm_sz);
 		if (IS_WS(c) || c == ',') {
@@ -3387,8 +3470,13 @@ STACK_FRAME_NON_STANDARD(__parse_m_override);
 static inline void
 __parser_init(TfwHttpParser *parser)
 {
+	TfwPool *pool = parser->pool;
+
+	BUG_ON(!TFW_STR_EMPTY(&parser->cut));
+
 	bzero_fast(parser, sizeof(TfwHttpParser));
 	parser->to_read = -1; /* unknown body size */
+	parser->pool = pool;
 }
 
 void

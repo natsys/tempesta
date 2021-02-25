@@ -242,6 +242,8 @@ enum {
 	TFW_HTTP_B_CHUNKED_APPLIED,
 	/* Message has chunked trailer headers part. */
 	TFW_HTTP_B_CHUNKED_TRAILER,
+	/* Message has transfer encodings other than chunked. */
+	TFW_HTTP_B_TE_EXTRA,
 	/* The message body is limited by the connection closing. */
 	TFW_HTTP_B_UNLIMITED,
 	/* Media type is multipart/form-data. */
@@ -658,6 +660,7 @@ void tfw_http_hm_srv_send(TfwServer *srv, char *data, unsigned long len);
 int tfw_h1_set_loc_hdrs(TfwHttpMsg *hm, bool is_resp, bool from_cache);
 int tfw_http_expand_stale_warn(TfwHttpResp *resp);
 int tfw_http_expand_hdr_date(TfwHttpResp *resp);
+int tfw_http_expand_hdr_clen(TfwHttpResp *resp, size_t len);
 int tfw_http_expand_hbh(TfwHttpResp *resp, unsigned short status);
 int tfw_http_expand_hdr_via(TfwHttpResp *resp);
 void tfw_h2_resp_fwd(TfwHttpResp *resp);

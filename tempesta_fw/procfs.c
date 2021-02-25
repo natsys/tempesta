@@ -118,9 +118,11 @@ tfw_perfstat_seq_show(struct seq_file *seq, void *off)
 		seq_printf(seq, "SS backlog's sizes\t\t\t: n/a\n");
 	}
 
+#ifdef DEBUG
 	/* Socket buffers kernel statistics. */
 	seq_printf(seq, "Socket buffers in flight\t\t: %ld\n",
 		   __get_skb_count());
+#endif /* DEBUG */
 
 	/* Cache statistics. */
 	SPRN("Cache hits\t\t\t\t", cache.hits);

@@ -1605,23 +1605,25 @@ ss_skb_cut_extra_data(struct sk_buff *skb_head, struct sk_buff *skb,
 		 * head space), but the stop pointer is not reached yet. Move to
 		 * the next fragment (or skb).
 		 */
-		if (skb_shinfo(skb)->nr_frags > frag_num + 1) {
-			skb_frag_t *frag;
+		do {
+			if (skb_shinfo(skb)->nr_frags > frag_num + 1) {
+				skb_frag_t *frag;
 
-			++frag_num;
-			frag = &skb_shinfo(skb)->frags[frag_num];
-			size = skb_frag_size(frag);
-			addr = curr = skb_frag_address(frag);
-		}
-		else {
-			if (WARN_ON_ONCE(skb_head == skb->next))
-				return -EINVAL;
+				++frag_num;
+				frag = &skb_shinfo(skb)->frags[frag_num];
+				size = skb_frag_size(frag);
+				addr = curr = skb_frag_address(frag);
+			}
+			else {
+				if (WARN_ON_ONCE(skb_head == skb->next))
+					return -EINVAL;
 
-			frag_num = -1;
-			skb = skb->next;
-			size = skb_headlen(skb);
-			addr = curr = skb->data;
-		}
+				frag_num = -1;
+				skb = skb->next;
+				size = skb_headlen(skb);
+				addr = curr = skb->data;
+			}
+		} while (!size);
 
 		offset = 0;
 	}

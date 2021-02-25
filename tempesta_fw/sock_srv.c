@@ -608,6 +608,11 @@ tfw_srv_conn_alloc(void)
 	INIT_LIST_HEAD(&srv_conn->nip_queue);
 	spin_lock_init(&srv_conn->fwd_qlock);
 
+	if (!(srv_conn->stream.parser.pool = __tfw_pool_new(0))) {
+		kmem_cache_free(tfw_srv_conn_cache, srv_conn);
+		return NULL;
+	}
+
 	/*
 	 * Initialization into special value for force releasing
 	 * of taken server's reference counter on connection removing.
@@ -630,6 +635,7 @@ tfw_srv_conn_free(TfwSrvConn *srv_conn)
 	BUG_ON(!list_empty(&srv_conn->nip_queue));
 	BUG_ON(ACCESS_ONCE(srv_conn->qsize));
 
+	tfw_pool_destroy(srv_conn->stream.parser.pool);
 	kmem_cache_free(tfw_srv_conn_cache, srv_conn);
 }
 
